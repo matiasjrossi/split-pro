@@ -33,9 +33,16 @@ const FriendPage: NextPageWithUser = ({ user }) => {
     { enabled: Boolean(_friendId) },
   );
 
-  const expenses = api.expense.getExpensesWithFriend.useQuery(
+  const expenses = api.expense.getExpensesWithFriend.useInfiniteQuery(
     { friendId: _friendId },
-    { enabled: Boolean(_friendId) },
+    {
+      enabled: Boolean(_friendId),
+      getNextPageParam: (lastPage) => lastPage.nextCursor,
+    },
+  );
+  const allExpenses = useMemo(
+    () => expenses.data?.pages.flatMap((page) => page.expenses) ?? [],
+    [expenses.data],
   );
   const balances = api.user.getBalancesWithFriend.useQuery(
     { friendId: _friendId },
@@ -191,19 +198,21 @@ const FriendPage: NextPageWithUser = ({ user }) => {
                 </Button>
               </Link>
               <Export
-                expenses={expenses.data}
                 fileName={`expenses_with_${displayName(friendQuery.data)}`}
                 currentUserId={user.id}
                 friendName={displayName(friendQuery.data) ?? ''}
-                friendId={friendQuery.data?.id ?? ''}
-                disabled={!expenses.data || 0 === expenses.data.length}
+                friendId={friendQuery.data.id}
+                disabled={0 === allExpenses.length}
               />
             </div>
             <ExpenseList
-              expenses={expenses.data}
+              expenses={allExpenses}
               contactId={_friendId}
               isLoading={expenses.isPending}
               userId={user.id}
+              hasMore={expenses.hasNextPage}
+              isFetchingMore={expenses.isFetchingNextPage}
+              onLoadMore={() => void expenses.fetchNextPage()}
             />
           </div>
         )}

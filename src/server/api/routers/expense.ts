@@ -20,6 +20,43 @@ import { SplitType } from '@prisma/client';
 import { DEFAULT_CATEGORY } from '~/lib/category';
 import { getUserMap } from './user';
 import { FriendBalance } from '~/components/Friend/FriendBalance';
+import { type Prisma } from '@prisma/client';
+
+// Shared `where` + `include` for the expenses shared between the current user
+// and a friend. Used by both the paginated list (`getExpensesWithFriend`) and
+// the unpaginated export query (`getAllExpensesWithFriend`) so the two can
+// never drift apart.
+const friendExpensesArgs = (userId: number, friendId: number) =>
+  ({
+    where: {
+      AND: [
+        { expenseParticipants: { some: { userId: friendId, amount: { not: 0n } } } },
+        { expenseParticipants: { some: { userId, amount: { not: 0n } } } },
+        { OR: [{ paidBy: userId }, { paidBy: friendId }] },
+        { deletedBy: null },
+        {
+          OR: [
+            { NOT: { splitType: SplitType.CURRENCY_CONVERSION } },
+            { NOT: { conversionToId: null } },
+          ],
+        },
+      ],
+    },
+    // `expenseDate` is not unique, so add `id` as a tiebreaker to guarantee a
+    // stable total order for cursor pagination (otherwise rows sharing a date
+    // could be skipped or repeated across page boundaries).
+    orderBy: [{ expenseDate: 'desc' }, { id: 'desc' }],
+    include: {
+      expenseParticipants: {
+        where: { OR: [{ userId }, { userId: friendId }] },
+      },
+      paidByUser: true,
+      conversionTo: true,
+      group: {
+        select: { id: true, name: true, simplifyDebts: true },
+      },
+    },
+  }) satisfies Prisma.ExpenseFindManyArgs;
 
 export const expenseRouter = createTRPCRouter({
   getCumulatedBalances: protectedProcedure.query(async ({ ctx }) => {
@@ -229,89 +266,40 @@ export const expenseRouter = createTRPCRouter({
     }),
 
   getExpensesWithFriend: protectedProcedure
-    .input(z.object({ friendId: z.number() }))
+    .input(
+      z.object({
+        friendId: z.number(),
+        limit: z.number().min(1).max(100).default(20),
+        // Cursor is the `id` (cuid string) of the last expense from the
+        // previous page.
+        cursor: z.string().nullish(),
+      }),
+    )
     .query(async ({ input, ctx }) => {
       const expenses = await db.expense.findMany({
-        where: {
-          AND: [
-            {
-              expenseParticipants: {
-                some: {
-                  userId: input.friendId,
-                  amount: {
-                    not: 0n,
-                  },
-                },
-              },
-            },
-            {
-              expenseParticipants: {
-                some: {
-                  userId: ctx.session.user.id,
-                  amount: {
-                    not: 0n,
-                  },
-                },
-              },
-            },
-            {
-              OR: [
-                {
-                  paidBy: ctx.session.user.id,
-                },
-                {
-                  paidBy: input.friendId,
-                },
-              ],
-            },
-            {
-              deletedBy: null,
-            },
-            {
-              OR: [
-                {
-                  NOT: {
-                    splitType: SplitType.CURRENCY_CONVERSION,
-                  },
-                },
-                {
-                  NOT: {
-                    conversionToId: null,
-                  },
-                },
-              ],
-            },
-          ],
-        },
-        orderBy: {
-          expenseDate: 'desc',
-        },
-        include: {
-          expenseParticipants: {
-            where: {
-              OR: [
-                {
-                  userId: ctx.session.user.id,
-                },
-                {
-                  userId: input.friendId,
-                },
-              ],
-            },
-          },
-          paidByUser: true,
-          conversionTo: true,
-          group: {
-            select: {
-              id: true,
-              name: true,
-              simplifyDebts: true,
-            },
-          },
-        },
+        ...friendExpensesArgs(ctx.session.user.id, input.friendId),
+        // Fetch one extra row to detect whether another page exists without a
+        // separate count query.
+        take: input.limit + 1,
+        ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
       });
 
-      return expenses;
+      let nextCursor: string | undefined = undefined;
+      if (expenses.length > input.limit) {
+        nextCursor = expenses.pop()!.id;
+      }
+
+      return { expenses, nextCursor };
+    }),
+
+  // Unpaginated full history between two friends. Kept separate from
+  // `getExpensesWithFriend` (which is now paginated) so the CSV export can
+  // still fetch everything on demand, without forcing every page load to pull
+  // the whole history.
+  getAllExpensesWithFriend: protectedProcedure
+    .input(z.object({ friendId: z.number() }))
+    .query(async ({ input, ctx }) => {
+      return db.expense.findMany(friendExpensesArgs(ctx.session.user.id, input.friendId));
     }),
 
   getGroupExpenses: groupProcedure

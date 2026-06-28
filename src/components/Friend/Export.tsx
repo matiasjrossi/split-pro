@@ -1,22 +1,22 @@
-import { type Expense, type ExpenseParticipant, SplitType } from '@prisma/client';
+import { SplitType } from '@prisma/client';
 import { format } from 'date-fns';
 import { Download } from 'lucide-react';
-import React from 'react';
+import React, { useState } from 'react';
+import { toast } from 'sonner';
 
 import { Button } from '~/components/ui/button';
 import { useTranslationWithUtils } from '~/hooks/useTranslationWithUtils';
+import { api } from '~/utils/api';
 
 interface ExportCSVProps {
-  expenses?: (Expense & { expenseParticipants: ExpenseParticipant[] })[];
   fileName: string;
   currentUserId: number;
   friendName: string;
-  friendId: string | number;
+  friendId: number;
   disabled?: boolean;
 }
 
 export const Export: React.FC<ExportCSVProps> = ({
-  expenses = [],
   fileName,
   currentUserId,
   friendName,
@@ -36,9 +36,20 @@ export const Export: React.FC<ExportCSVProps> = ({
     'Settlement',
   ];
 
-  const { getCurrencyHelpersCached } = useTranslationWithUtils('common');
+  const { getCurrencyHelpersCached, t } = useTranslationWithUtils('common');
 
-  const exportToCSV = () => {
+  // The expenses list is paginated on the page, so the export pulls the full
+  // history on demand (lazy query, `enabled: false`) rather than relying on
+  // however many pages happen to be loaded.
+  const [isExporting, setIsExporting] = useState(false);
+  const allExpenses = api.expense.getAllExpensesWithFriend.useQuery(
+    { friendId },
+    { enabled: false },
+  );
+
+  const buildAndDownloadCSV = (
+    expenses: NonNullable<typeof allExpenses.data>,
+  ) => {
     const csvHeaders = headers.join(',');
     const csvData = expenses.map((expense) => {
       const youPaid = expense.paidBy === currentUserId;
@@ -82,11 +93,32 @@ export const Export: React.FC<ExportCSVProps> = ({
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const exportToCSV = async () => {
+    setIsExporting(true);
+    try {
+      const { data } = await allExpenses.refetch();
+      if (data) {
+        buildAndDownloadCSV(data);
+      }
+    } catch {
+      toast.error(t('errors.something_went_wrong'));
+    } finally {
+      setIsExporting(false);
     }
   };
 
   return (
-    <Button size="sm" variant="secondary" responsiveIcon onClick={exportToCSV} disabled={disabled}>
+    <Button
+      size="sm"
+      variant="secondary"
+      responsiveIcon
+      onClick={exportToCSV}
+      disabled={disabled || isExporting}
+    >
       <Download className="h-4 w-4 text-white" size={20} /> Export
     </Button>
   );
