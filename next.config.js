@@ -15,6 +15,11 @@ await jiti.import('./src/env');
 const nextConfig = {
   reactStrictMode: true,
   output: process.env.DOCKER_OUTPUT ? 'standalone' : undefined,
+  // Pin the build ID to NEXT_BUILD_ID when set, so a build from a given commit
+  // is byte-reproducible (Docker images keyed to the source rev don't churn on
+  // rebuild). Falling back to `null` keeps Next's default random ID for normal
+  // local/dev builds where the env isn't set.
+  generateBuildId: () => process.env.NEXT_BUILD_ID ?? null,
   transpilePackages: ['@t3-oss/env-nextjs', '@t3-oss/env-core'],
   /**
    * If you are using `appDir` then you must comment the below `i18n` config out.
