@@ -3,7 +3,7 @@ import { type inferRouterOutputs } from '@trpc/server';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 import { CategoryIcon, CurrencyConversionIcon, SettleupIcon } from '~/components/ui/categoryIcons';
 import { useTranslationWithUtils } from '~/hooks/useTranslationWithUtils';
@@ -14,7 +14,7 @@ import { Separator } from '../ui/separator';
 
 type ExpensesOutput =
   | inferRouterOutputs<ExpenseRouter>['getGroupExpenses']
-  | inferRouterOutputs<ExpenseRouter>['getExpensesWithFriend'];
+  | inferRouterOutputs<ExpenseRouter>['getExpensesWithFriend']['expenses'];
 
 type SingleExpenseOutput = ExpensesOutput[number];
 
@@ -29,12 +29,44 @@ export const ExpenseList: React.FC<{
   contactId: number;
   isGroup?: boolean;
   isLoading?: boolean;
-}> = ({ userId, isGroup = false, expenses = [], contactId, isLoading }) => {
+  hasMore?: boolean;
+  isFetchingMore?: boolean;
+  onLoadMore?: () => void;
+}> = ({
+  userId,
+  isGroup = false,
+  expenses = [],
+  contactId,
+  isLoading,
+  hasMore = false,
+  isFetchingMore = false,
+  onLoadMore,
+}) => {
+  const { i18n } = useTranslationWithUtils();
+
+  // Auto-load the next page when the sentinel scrolls into view. `rootMargin`
+  // pre-fetches a screenful early so scrolling feels seamless.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node || !hasMore || !onLoadMore) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          onLoadMore();
+        }
+      },
+      { rootMargin: '600px' },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, isFetchingMore, onLoadMore, expenses.length]);
+
   if (!isLoading && expenses.length === 0) {
     return <NoExpenses />;
   }
-
-  const { i18n } = useTranslationWithUtils();
 
   let lastDate: Date | null = null;
 
@@ -81,6 +113,12 @@ export const ExpenseList: React.FC<{
           </React.Fragment>
         );
       })}
+      {hasMore && <div ref={sentinelRef} aria-hidden className="h-px" />}
+      {isFetchingMore && (
+        <div className="flex justify-center py-3">
+          <div className="size-5 animate-spin rounded-full border-2 border-gray-700 border-t-transparent" />
+        </div>
+      )}
     </div>
   );
 };
