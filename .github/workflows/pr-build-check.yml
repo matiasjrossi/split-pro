@@ -1,0 +1,70 @@
+name: PR build check
+
+# Build gate for upstream-merge PRs. `pnpm build` runs `next build`, which
+# typechecks — so a merge where `-X ours` kept a stale file that no longer
+# compiles against the new upstream fails here and never reaches `main` (and so
+# never reaches perrita's deploy). On green, auto-merge into `main`.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or SHA to build'
+        required: true
+
+jobs:
+  build:
+    # Only the sync's upstream-merge PRs auto-merge; a manual dispatch just builds.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.head_ref, 'upstream-merge/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.head_ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+
+      # Same env the perrita image build uses (image/splitpro/Dockerfile): env
+      # validation is a runtime concern, so it's skipped for the build.
+      - name: Build (typecheck gate)
+        env:
+          SKIP_ENV_VALIDATION: 'true'
+          DOCKER_OUTPUT: '1'
+          NEXT_TELEMETRY_DISABLED: '1'
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+        run: |
+          set -euxo pipefail
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Auto-merge on success
+        if: success() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          gh pr merge ${{ github.event.pull_request.number }} \
+            --repo "$GITHUB_REPOSITORY" --merge --delete-branch
+
+      - name: Comment on failure
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --repo "$GITHUB_REPOSITORY" \
+            --body "@matiasjrossi Build check failed — \`-X ours\` kept a file that no longer builds against this upstream release. Our patch needs a manual rework on this branch before it can merge."

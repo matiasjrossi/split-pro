@@ -1,0 +1,84 @@
+name: Sync upstream
+
+# Keep this fork current with oss-apps/split-pro WITHOUT losing our patch
+# (cursor pagination + infinite scroll, the commits on `main`). Modelled on
+# matiasjrossi/yapperoni-ios: we MERGE upstream in with `-X ours`, never rebase —
+# a rebase would replay our patch onto the bare upstream tag and conflict on
+# every release; a merge keeps `main` as the merge-base so the upstream bump is a
+# clean one-sided change that stays auto-mergeable.
+#
+# On a new upstream RELEASE tag: open `upstream-merge/vX.Y` (main + merged tag).
+# pr-build-check.yml then builds it and auto-merges on green. perrita's nightly
+# docker-image.yml resolves `main` -> SHA and redeploys — so a merged release
+# ships automatically once it builds.
+on:
+  schedule:
+    - cron: '25 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # App token, not GITHUB_TOKEN: the merged branch carries upstream's
+      # .github/workflows/* and GITHUB_TOKEN is forbidden from pushing workflow
+      # files. The claudio-el-pizzero App has `workflows: write`.
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Merge latest upstream release into a PR branch
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euxo pipefail
+          git config user.name 'claudio-el-pizzero[bot]'
+          git config user.email '274947854+claudio-el-pizzero[bot]@users.noreply.github.com'
+
+          git remote add upstream https://github.com/oss-apps/split-pro.git 2>/dev/null || true
+          git fetch upstream main --tags --force
+
+          # DR reference: keep an `upstream` branch mirroring upstream's main.
+          git push origin refs/remotes/upstream/main:refs/heads/upstream --force
+
+          # Latest upstream release tag (vX.Y[.Z]).
+          LATEST=$(git tag -l 'v*' --sort=v:refname | grep -E '^v[0-9]' | tail -1)
+          echo "latest upstream release: $LATEST"
+          TAG_SHA=$(git rev-parse "$LATEST^{commit}")
+
+          if git merge-base --is-ancestor "$TAG_SHA" HEAD; then
+            echo "main already contains $LATEST — nothing to do."
+            exit 0
+          fi
+
+          BRANCH="upstream-merge/$LATEST"
+          if [ -n "$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')" ]; then
+            echo "PR for $BRANCH already open — leaving it."
+            exit 0
+          fi
+
+          git checkout -B "$BRANCH" main
+          # -X ours = keep OUR content on conflicting hunks (our patch wins). A
+          # modify/delete isn't auto-resolvable by -X ours, so finalize keeping ours.
+          git merge -X ours "$LATEST" --no-edit || { git add -A; git commit -m "Merge upstream $LATEST (auto-resolved with -X ours)"; }
+          git push origin "$BRANCH" --force-with-lease
+
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+            --title "Upstream merge: $LATEST" \
+            --body "Merges upstream release \`$LATEST\` into \`main\` with \`-X ours\` (keeps our cursor-pagination patch). Auto-merges once the build check passes. If the build fails, our patch needs a manual rework against this release."
